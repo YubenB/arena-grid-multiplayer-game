@@ -5,7 +5,12 @@ const app = express()
 const http = require('http')
 const server = http.createServer(app)
 const { Server } = require('socket.io')
-const io = new Server(server, { pingInterval: 2000, pingTimeout: 5000 })
+const io = new Server(server, {
+  pingInterval: 10000,
+  pingTimeout: 20000,
+  transports: ['websocket'],
+  perMessageDeflate: false
+})
 
 const CONFIG = {
   port: 3000,
@@ -96,8 +101,30 @@ function createPlayer(rawUsername, options = {}) {
     lastShotAt: 0,
     username: buildUsername(rawUsername),
     isBot,
+    inputX: 0,
+    inputY: 0,
     aiMoveAngle: Math.random() * Math.PI * 2,
     aiNextTurnAt: 0
+  }
+}
+
+function normalizeInputVector(inputX, inputY) {
+  const x = Number.isFinite(inputX) ? inputX : 0
+  const y = Number.isFinite(inputY) ? inputY : 0
+  const clampedX = Math.max(-1, Math.min(1, x))
+  const clampedY = Math.max(-1, Math.min(1, y))
+  const distance = Math.hypot(clampedX, clampedY)
+
+  if (distance <= 1) {
+    return {
+      x: clampedX,
+      y: clampedY
+    }
+  }
+
+  return {
+    x: clampedX / distance,
+    y: clampedY / distance
   }
 }
 
@@ -255,9 +282,11 @@ function emitRoomState(roomId) {
   const room = rooms[roomId]
   if (!room) return
 
-  io.to(roomId).emit('updatePlayers', room.players)
-  io.to(roomId).emit('updateProjectiles', room.projectiles)
-  io.to(roomId).emit('roomStats', buildRoomStats(room))
+  io.to(roomId).emit('stateUpdate', {
+    players: room.players,
+    projectiles: room.projectiles,
+    stats: buildRoomStats(room)
+  })
 }
 
 function removeProjectilesByPlayer(room, playerId) {
@@ -334,6 +363,8 @@ io.on('connection', (socket) => {
     const player = activeRoom.players[socket.id]
     if (!player || player.isBot || player.isAlive) return
 
+    player.inputX = 0
+    player.inputY = 0
     respawnPlayer(player)
     emitRoomState(activeRoom.id)
   })
@@ -350,6 +381,19 @@ io.on('connection', (socket) => {
     removeSocketFromRoom(socket.id)
   })
 
+  socket.on('playerInput', ({ inputX, inputY, sequenceNumber }) => {
+    const activeRoom = getRoomBySocket(socket.id)
+    if (!activeRoom) return
+
+    const backEndPlayer = activeRoom.players[socket.id]
+    if (!backEndPlayer || !backEndPlayer.isAlive) return
+
+    const normalizedInput = normalizeInputVector(inputX, inputY)
+    backEndPlayer.inputX = normalizedInput.x
+    backEndPlayer.inputY = normalizedInput.y
+    backEndPlayer.sequenceNumber = sequenceNumber
+  })
+
   socket.on('keydown', ({ keycode, sequenceNumber }) => {
     const activeRoom = getRoomBySocket(socket.id)
     if (!activeRoom) return
@@ -357,26 +401,34 @@ io.on('connection', (socket) => {
     const backEndPlayer = activeRoom.players[socket.id]
     if (!backEndPlayer || !backEndPlayer.isAlive) return
 
-    backEndPlayer.sequenceNumber = sequenceNumber
+    let inputX = 0
+    let inputY = 0
+
     switch (keycode) {
       case 'KeyW':
-        backEndPlayer.y -= CONFIG.playerSpeed
+        inputY = -1
         break
 
       case 'KeyA':
-        backEndPlayer.x -= CONFIG.playerSpeed
+        inputX = -1
         break
 
       case 'KeyS':
-        backEndPlayer.y += CONFIG.playerSpeed
+        inputY = 1
         break
 
       case 'KeyD':
-        backEndPlayer.x += CONFIG.playerSpeed
+        inputX = 1
         break
+
+      default:
+        return
     }
 
-    clampPlayerWithinWorld(backEndPlayer)
+    const normalizedInput = normalizeInputVector(inputX, inputY)
+    backEndPlayer.inputX = normalizedInput.x
+    backEndPlayer.inputY = normalizedInput.y
+    backEndPlayer.sequenceNumber = sequenceNumber
   })
 })
 
@@ -389,6 +441,12 @@ setInterval(() => {
 
     for (const playerId in room.players) {
       const player = room.players[playerId]
+
+      if (!player.isBot && player.isAlive) {
+        player.x += player.inputX * CONFIG.playerSpeed
+        player.y += player.inputY * CONFIG.playerSpeed
+        clampPlayerWithinWorld(player)
+      }
 
       if (
         player.isBot &&
@@ -441,6 +499,8 @@ setInterval(() => {
           if (backEndPlayer.hp <= 0) {
             backEndPlayer.hp = 0
             backEndPlayer.isAlive = false
+            backEndPlayer.inputX = 0
+            backEndPlayer.inputY = 0
             backEndPlayer.deaths++
             backEndPlayer.respawnAt = backEndPlayer.isBot
               ? now + CONFIG.respawnMs
