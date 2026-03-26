@@ -121,6 +121,7 @@ const pendingInputs = []
 let localInputSequence = 0
 let lastInputSignature = ''
 let lastInputSentAt = 0
+let activeUsername = ''
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value))
@@ -380,6 +381,19 @@ function openMainMenuOverlay() {
     usernameInputEl.select()
   }
 }
+
+socket.on('disconnect', () => {
+  clearPlayerInputs()
+})
+
+socket.on('connect', () => {
+  if (!activeUsername) return
+  if (usernameOverlayEl && usernameOverlayEl.style.display !== 'none') return
+
+  socket.emit('initGame', {
+    username: activeUsername
+  })
+})
 
 function startAutoFire() {
   if (mobileState.autoFireId) return
@@ -669,7 +683,7 @@ socket.on('state', (payload) => {
         y: backEndProjectile.y,
         radius: backEndProjectile.radius,
         color: frontEndPlayers[backEndProjectile.playerId]?.color,
-        velocity: backEndProjectile.velocity
+        velocity: backEndProjectile.velocity || { x: 0, y: 0 }
       })
     }
 
@@ -677,7 +691,10 @@ socket.on('state', (payload) => {
       x: backEndProjectile.x,
       y: backEndProjectile.y
     }
-    frontEndProjectiles[projectileId].velocity = backEndProjectile.velocity
+    frontEndProjectiles[projectileId].velocity = backEndProjectile.velocity || {
+      x: 0,
+      y: 0
+    }
 
     if (frontEndPlayers[backEndProjectile.playerId]) {
       frontEndProjectiles[projectileId].color =
@@ -751,10 +768,11 @@ function animate(now = performance.now()) {
 
   for (const id in frontEndProjectiles) {
     const frontEndProjectile = frontEndProjectiles[id]
+    const velocity = frontEndProjectile.velocity || { x: 0, y: 0 }
 
     const tickScale = deltaMs / SERVER_TICK_MS
-    frontEndProjectile.x += frontEndProjectile.velocity.x * tickScale
-    frontEndProjectile.y += frontEndProjectile.velocity.y * tickScale
+    frontEndProjectile.x += (velocity.x || 0) * tickScale
+    frontEndProjectile.y += (velocity.y || 0) * tickScale
 
     if (frontEndProjectile.target) {
       frontEndProjectile.x +=
@@ -891,9 +909,10 @@ document.querySelector('#usernameForm').addEventListener('submit', (event) => {
   localInputSequence = 0
   lastInputSignature = ''
   lastInputSentAt = 0
+  activeUsername = usernameInputEl ? usernameInputEl.value : ''
 
   socket.emit('initGame', {
-    username: usernameInputEl ? usernameInputEl.value : ''
+    username: activeUsername
   })
 
   // iOS Safari may keep a zoomed visual viewport after keyboard hide.

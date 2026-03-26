@@ -4,7 +4,10 @@ const app = express()
 const http = require('http')
 const server = http.createServer(app)
 const { Server } = require('socket.io')
-const io = new Server(server, { pingInterval: 2000, pingTimeout: 5000 })
+const io = new Server(server, {
+  pingInterval: 10000,
+  pingTimeout: 30000
+})
 
 const CONFIG = {
   port: 3000,
@@ -610,9 +613,29 @@ io.on('connection', (socket) => {
   })
 })
 
-setInterval(gameTick, CONFIG.tickRateMs)
-setInterval(broadcastTick, CONFIG.stateBroadcastMs)
-setInterval(botTick, CONFIG.botTickMs)
+setInterval(() => {
+  try {
+    gameTick()
+  } catch (error) {
+    console.error('gameTick failed:', error)
+  }
+}, CONFIG.tickRateMs)
+
+setInterval(() => {
+  try {
+    broadcastTick()
+  } catch (error) {
+    console.error('broadcastTick failed:', error)
+  }
+}, CONFIG.stateBroadcastMs)
+
+setInterval(() => {
+  try {
+    botTick()
+  } catch (error) {
+    console.error('botTick failed:', error)
+  }
+}, CONFIG.botTickMs)
 
 server.listen(CONFIG.port, () => {
   console.log(`Example app listening on port ${CONFIG.port}`)
