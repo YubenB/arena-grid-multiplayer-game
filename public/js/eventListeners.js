@@ -1,35 +1,24 @@
-addEventListener('click', (event) => {
-  const canvas = document.querySelector('canvas')
-  const { top, left } = canvas.getBoundingClientRect()
-  const playerPosition = {
-    x: frontEndPlayers[socket.id].x,
-    y: frontEndPlayers[socket.id].y
-  }
+const gameCanvas = document.querySelector('canvas')
+let lastShotInputAt = 0
 
-  const angle = Math.atan2(
-    event.clientY - top - playerPosition.y,
-    event.clientX - left - playerPosition.x
-  )
+function handleShootInput(event) {
+  if (typeof emitShootAtClientPoint !== 'function') return
 
-  // const velocity = {
-  //   x: Math.cos(angle) * 5,
-  //   y: Math.sin(angle) * 5
-  // }
+  const now = performance.now()
+  if (now - lastShotInputAt < 80) return
+  lastShotInputAt = now
 
-  socket.emit('shoot', {
-    x: playerPosition.x,
-    y: playerPosition.y,
-    angle
-  })
-  // frontEndProjectiles.push(
-  //   new Projectile({
-  //     x: playerPosition.x,
-  //     y: playerPosition.y,
-  //     radius: 5,
-  //     color: 'white',
-  //     velocity
-  //   })
-  // )
+  emitShootAtClientPoint(event.clientX, event.clientY)
+}
 
-  console.log(frontEndProjectiles)
+gameCanvas.addEventListener('pointerdown', (event) => {
+  if (event.button !== 0 && event.pointerType === 'mouse') return
+
+  handleShootInput(event)
+})
+
+// Some desktop browsers can miss pointerdown for tap-to-click setups.
+gameCanvas.addEventListener('click', (event) => {
+  if (event.button !== 0) return
+  handleShootInput(event)
 })

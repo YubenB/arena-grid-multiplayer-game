@@ -1,92 +1,456 @@
 <html>
   <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700&display=swap"
+      rel="stylesheet"
+    />
     <style>
-      body {
-        -webkit-font-smoothing: antialiased;
-        -moz-osx-font-smoothing: grayscale;
-        text-rendering: optimizeLegibility;
-        margin: 0;
-        background: #94a3b8;
+      html {
+        -webkit-text-size-adjust: 100%;
       }
 
-      input::placeholder {
-        color: #94a3b8;
+      :root {
+        --bg-0: #071221;
+        --bg-1: #101f35;
+        --panel: rgba(5, 16, 31, 0.72);
+        --panel-strong: rgba(7, 23, 41, 0.9);
+        --text: #f8f9ff;
+        --muted: #b7c7de;
+        --accent: #14b8a6;
+        --accent-soft: #34d399;
+        --danger: #f97316;
+        --border: rgba(255, 255, 255, 0.1);
+        --safe-top: env(safe-area-inset-top);
+        --safe-right: env(safe-area-inset-right);
+        --safe-bottom: env(safe-area-inset-bottom);
+        --safe-left: env(safe-area-inset-left);
+        --app-vh: 100dvh;
+        --browser-ui-bottom: 0px;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100dvh;
+        display: flex;
+        justify-content: flex-start;
+        align-items: stretch;
+        font-family: 'Space Grotesk', sans-serif;
+        overflow: hidden;
+        touch-action: none;
+        overscroll-behavior: none;
+        background: #071221;
+        color: var(--text);
+      }
+
+      .game-shell {
+        position: fixed;
+        inset: 0;
+        width: 100%;
+        height: var(--app-vh);
+        max-height: none;
+        border-radius: 0;
+        overflow: hidden;
+        border: none;
+        box-shadow: none;
+        touch-action: none;
       }
 
       canvas {
-        width: 1024px;
-        height: 576px;
-        background-image: url('/img/webb-dark.png');
+        width: 100%;
+        height: 100%;
+        aspect-ratio: auto;
+        display: block;
+        touch-action: none;
+        background: #0b1628;
+      }
+
+      .hud-panel {
+        position: absolute;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        backdrop-filter: blur(6px);
+      }
+
+      .hud-leaderboard {
+        top: 14px;
+        left: 14px;
+        width: min(320px, 46vw);
+        max-height: 56%;
+        overflow: auto;
+        border-radius: 14px;
+        padding: 12px;
+      }
+
+      .leaderboard-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        margin-bottom: 8px;
+      }
+
+      .hud-leaderboard h3 {
+        margin: 0;
+        font-size: 14px;
+        text-transform: uppercase;
+        color: var(--muted);
+        letter-spacing: 0.08em;
+      }
+
+      .leaderboard-toggle {
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        border-radius: 999px;
+        background: rgba(10, 22, 40, 0.85);
+        color: var(--text);
+        font-family: inherit;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        padding: 5px 10px;
+        cursor: pointer;
+      }
+
+      .hud-leaderboard.collapsed {
+        max-height: none;
+        overflow: hidden;
+      }
+
+      .hud-leaderboard.collapsed #leaderboardContent {
+        display: none;
+      }
+
+      body.touch-ui .hud-leaderboard {
+        width: min(52vw, 260px);
+        max-height: 150px;
+        top: calc(max(8px, var(--safe-top)) + 6px);
+      }
+
+      body.touch-ui .hud-leaderboard h3 {
+        font-size: 12px;
+      }
+
+      body.touch-ui #playerLabels {
+        font-size: 11px;
+        line-height: 1.3;
+      }
+
+      #playerLabels {
+        font-size: 13px;
+        line-height: 1.45;
+      }
+
+      .username-overlay {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        background: rgba(1, 8, 17, 0.6);
+        backdrop-filter: blur(7px);
+      }
+
+      .death-overlay {
+        position: absolute;
+        inset: 0;
+        display: none;
+        justify-content: center;
+        align-items: center;
+        background: rgba(1, 8, 17, 0.6);
+        backdrop-filter: blur(6px);
+        z-index: 35;
+      }
+
+      .death-card {
+        width: min(380px, 86vw);
+        background: var(--panel-strong);
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        padding: 16px;
+      }
+
+      .death-card h2 {
+        margin: 0 0 6px;
+        font-size: 22px;
+      }
+
+      .death-card p {
+        margin: 0 0 12px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .death-actions {
+        display: flex;
+        gap: 10px;
+      }
+
+      .death-btn {
+        border: none;
+        border-radius: 10px;
+        padding: 10px 12px;
+        font-family: inherit;
+        font-weight: 700;
+        cursor: pointer;
+      }
+
+      .respawn-btn {
+        flex: 1;
+        background: linear-gradient(120deg, var(--accent), #0ea5e9);
+        color: #fff;
+      }
+
+      .menu-btn {
+        flex: 1;
+        background: rgba(17, 31, 52, 0.9);
+        color: #d3def0;
+        border: 1px solid rgba(255, 255, 255, 0.15);
+      }
+
+      .username-card {
+        width: min(420px, 88vw);
+        background: var(--panel-strong);
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        padding: 22px;
+        box-shadow: 0 12px 30px rgba(0, 0, 0, 0.36);
+      }
+
+      .username-card h1 {
+        margin: 0 0 4px;
+        font-size: 24px;
+      }
+
+      .username-card p {
+        margin: 0 0 14px;
+        color: var(--muted);
+        font-size: 14px;
+      }
+
+      #usernameInput {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 12px 14px;
+        font-size: 16px;
+        line-height: 1.2;
+        border-radius: 10px;
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        background: rgba(8, 22, 40, 0.9);
+        color: var(--text);
+        font-family: inherit;
+        margin-bottom: 12px;
+      }
+
+      #usernameInput::placeholder {
+        color: #90a9ca;
+      }
+
+      .start-btn {
+        width: 100%;
+        border: none;
+        border-radius: 12px;
+        padding: 11px 12px;
+        background: linear-gradient(62deg, var(--accent), var(--danger));
+        color: white;
+        font-family: inherit;
+        font-weight: 700;
+        cursor: pointer;
+      }
+
+      .mobile-controls {
+        display: none;
+        position: absolute;
+        left: 14px;
+        right: 14px;
+        bottom: 14px;
+        z-index: 40;
+        justify-content: space-between;
+        align-items: flex-end;
+        pointer-events: none;
+        box-sizing: border-box;
+      }
+
+      .joystick {
+        width: 112px;
+        height: 112px;
+        border-radius: 999px;
+        background: rgba(9, 20, 38, 0.78);
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        position: relative;
+        pointer-events: auto;
+      }
+
+      .joystick-knob {
+        position: absolute;
+        width: 52px;
+        height: 52px;
+        border-radius: 999px;
+        left: 50%;
+        top: 50%;
+        transform: translate(-50%, -50%);
+        background: linear-gradient(140deg, var(--accent), #0ea5e9);
+        box-shadow: 0 8px 18px rgba(0, 0, 0, 0.35);
+      }
+
+      .aim-joystick {
+        border-color: rgba(249, 115, 22, 0.38);
+      }
+
+      .aim-joystick .joystick-knob {
+        background: linear-gradient(145deg, #f97316, #ea580c);
+      }
+
+      @media (max-width: 900px), (hover: none) and (pointer: coarse) {
+        html,
+        body {
+          width: 100%;
+          height: 100%;
+          overflow: hidden;
+        }
+
+        body {
+          justify-content: flex-start;
+          align-items: stretch;
+          min-height: 100svh;
+          min-height: 100dvh;
+        }
+
+        .game-shell {
+          position: fixed;
+          inset: 0;
+          width: 100%;
+          height: var(--app-vh);
+          max-height: none;
+          border-radius: 0;
+          border: none;
+          box-shadow: none;
+        }
+
+        canvas {
+          width: 100%;
+          height: 100%;
+          aspect-ratio: auto;
+        }
+
+        .hud-leaderboard {
+          left: max(8px, var(--safe-left));
+          right: auto;
+          width: min(66vw, 340px);
+          max-height: min(22%, 240px);
+          top: calc(max(8px, var(--safe-top)) + 8px);
+          bottom: auto;
+          font-size: 12px;
+        }
+
+        .leaderboard-toggle {
+          font-size: 10px;
+          padding: 4px 8px;
+        }
+
+        .mobile-controls {
+          display: flex;
+          left: max(8px, var(--safe-left));
+          right: max(8px, var(--safe-right));
+          bottom: calc(
+            max(10px, var(--safe-bottom)) + var(--browser-ui-bottom)
+          );
+          width: auto;
+        }
+
+        .joystick {
+          width: 104px;
+          height: 104px;
+        }
+
+        .aim-joystick {
+          width: 88px;
+          height: 88px;
+        }
+      }
+
+      @media (hover: none) and (pointer: coarse) and (orientation: landscape) {
+        .hud-leaderboard {
+          width: min(40vw, 320px);
+          max-height: min(30vh, 170px);
+          top: calc(max(8px, var(--safe-top)) + 8px);
+        }
+
+        .joystick {
+          width: 92px;
+          height: 92px;
+        }
+
+        .aim-joystick {
+          width: 78px;
+          height: 78px;
+        }
       }
     </style>
   </head>
-  <body style="display: flex; align-items: center; justify-content: center">
-    <div>
-      <div
-        style="
-          position: absolute;
-          color: white;
-          padding: 8px;
-          font-family: sans-serif;
-          font-size: 14px;
-          user-select: none;
-          background: rgba(0, 0, 0, 0.5);
-        "
-      >
-        <div style="margin-bottom: 8px">Leaderboard</div>
-        <div id="playerLabels"></div>
+  <body>
+    <div class="game-shell">
+      <div class="hud-panel hud-leaderboard">
+        <div class="leaderboard-header">
+          <h3>Leaderboard</h3>
+          <button id="leaderboardToggle" class="leaderboard-toggle">
+            Hide
+          </button>
+        </div>
+        <div id="leaderboardContent">
+          <div id="playerLabels"></div>
+        </div>
       </div>
+
       <canvas></canvas>
 
-      <!-- username input -->
-      <div
-        style="
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          position: absolute;
-          top: 0;
-          right: 0;
-          bottom: 0;
-          left: 0;
-        "
-      >
-        <form id="usernameForm">
-          <div>
-            <input
-              id="usernameInput"
-              type="text"
-              placeholder="Username"
-              style="
-                padding: 12px;
-                border-radius: 20px;
-                border: none;
-                background: #475569;
-                color: #cbd5e1;
-              "
-            />
-          </div>
-          <div style="text-align: center; margin-top: 8px">
-            <button
-              style="
-                padding: 8px 20px;
-                border-radius: 100px;
-                border: none;
-                background-image: linear-gradient(
-                  to right,
-                  rgb(6, 182, 212),
-                  rgb(59, 130, 246)
-                );
-                color: white;
-                cursor: pointer;
-              "
-            >
-              Start!
-            </button>
-          </div>
+      <div class="username-overlay" id="usernameOverlay">
+        <form id="usernameForm" class="username-card">
+          <h1>Arena Grid</h1>
+          <p>
+            Kontrol: WASD untuk bergerak, mouse untuk mengarahkan dan menembak.
+            Pada hp, sentuh dan seret di sisi kiri layar untuk bergerak, dan
+            sisi kanan untuk mengarahkan serta menembak.
+          </p>
+
+          <input
+            id="usernameInput"
+            type="text"
+            placeholder="Masukan nama kamu..."
+          />
+
+          <button class="start-btn">Terjun</button>
         </form>
       </div>
-      <!-- username input end -->
+
+      <div class="death-overlay" id="deathOverlay">
+        <div class="death-card">
+          <h2>You Died</h2>
+          <p>Choose to respawn instantly or return to main menu.</p>
+          <div class="death-actions">
+            <button id="respawnBtn" class="death-btn respawn-btn" type="button">
+              Respawn
+            </button>
+            <button id="backToMenuBtn" class="death-btn menu-btn" type="button">
+              Main Menu
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div class="mobile-controls" id="mobileControls">
+        <div class="joystick" id="mobileJoystick">
+          <div class="joystick-knob" id="mobileJoystickKnob"></div>
+        </div>
+        <div class="joystick aim-joystick" id="mobileAimJoystick">
+          <div class="joystick-knob" id="mobileAimJoystickKnob"></div>
+        </div>
+      </div>
     </div>
 
     <script

@@ -7,12 +7,25 @@ class Projectile {
     this.velocity = velocity
   }
 
-  draw() {
+  draw(camera) {
+    const viewport = window.__GAME_VIEWPORT || { width: 1366, height: 768 }
+    const renderX = this.x - camera.x
+    const renderY = this.y - camera.y
+
+    if (
+      renderX + this.radius < 0 ||
+      renderX - this.radius > viewport.width ||
+      renderY + this.radius < 0 ||
+      renderY - this.radius > viewport.height
+    ) {
+      return
+    }
+
     c.save()
     c.shadowColor = this.color
     c.shadowBlur = 20
     c.beginPath()
-    c.arc(this.x, this.y, this.radius, 0, Math.PI * 2, false)
+    c.arc(renderX, renderY, this.radius, 0, Math.PI * 2, false)
     c.fillStyle = this.color
     c.fill()
     c.restore()
