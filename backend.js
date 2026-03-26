@@ -40,6 +40,9 @@ app.get('/', (req, res) => {
 
 const rooms = {}
 const socketToRoom = {}
+const PERSISTENT_ROOM_ID = 'room-1'
+
+rooms[PERSISTENT_ROOM_ID] = createRoom(PERSISTENT_ROOM_ID)
 
 function createDefaultInput() {
   return {
@@ -124,17 +127,62 @@ function createRoom(roomId) {
   return room
 }
 
-function getAvailableRoomId() {
-  const roomIds = Object.keys(rooms)
+function createNextRoomId() {
+  let maxRoomIndex = 0
 
-  for (const roomId of roomIds) {
+  for (const roomId in rooms) {
+    const match = /^room-(\d+)$/.exec(roomId)
+    if (!match) continue
+    maxRoomIndex = Math.max(maxRoomIndex, Number(match[1]))
+  }
+
+  return `room-${maxRoomIndex + 1}`
+}
+
+function pruneDisconnectedSockets(room) {
+  for (const socketId of Array.from(room.sockets)) {
+    if (io.sockets.sockets.has(socketId)) continue
+
+    room.sockets.delete(socketId)
+    delete socketToRoom[socketId]
+    removePlayerFromRoom(room, socketId)
+  }
+}
+
+function getAvailableRoomId() {
+  if (!rooms[PERSISTENT_ROOM_ID]) {
+    rooms[PERSISTENT_ROOM_ID] = createRoom(PERSISTENT_ROOM_ID)
+  }
+
+  let bestRoomId = null
+  let bestRoomPopulation = -1
+  let firstEmptyRoomId = null
+
+  for (const roomId in rooms) {
     const room = rooms[roomId]
-    if (room.sockets.size < CONFIG.roomMaxPlayers) {
-      return roomId
+    pruneDisconnectedSockets(room)
+
+    if (room.sockets.size >= CONFIG.roomMaxPlayers) {
+      continue
+    }
+
+    if (room.sockets.size > 0) {
+      if (room.sockets.size > bestRoomPopulation) {
+        bestRoomPopulation = room.sockets.size
+        bestRoomId = roomId
+      }
+      continue
+    }
+
+    if (!firstEmptyRoomId) {
+      firstEmptyRoomId = roomId
     }
   }
 
-  const nextRoomId = `room-${roomIds.length + 1}`
+  if (bestRoomId) return bestRoomId
+  if (firstEmptyRoomId) return firstEmptyRoomId
+
+  const nextRoomId = createNextRoomId()
   rooms[nextRoomId] = createRoom(nextRoomId)
   return nextRoomId
 }
@@ -255,9 +303,20 @@ function removeSocketFromRoom(socketId) {
   room.sockets.delete(socketId)
   delete socketToRoom[socketId]
 
-  if (room.sockets.size === 0) {
+  if (room.sockets.size === 0 && room.id !== PERSISTENT_ROOM_ID) {
     delete rooms[roomId]
   }
+}
+
+function countHumanArenaPlayers(room) {
+  let count = 0
+
+  for (const playerId in room.players) {
+    const player = room.players[playerId]
+    if (!player.isBot) count++
+  }
+
+  return count
 }
 
 function applyBufferedMovement(player) {
@@ -335,6 +394,10 @@ function getClosestHumanTarget(bot, players) {
 }
 
 function runBotAI(room, now) {
+  if (countHumanArenaPlayers(room) === 0) {
+    return
+  }
+
   for (const playerId in room.players) {
     const bot = room.players[playerId]
     if (!bot.isBot || !bot.isAlive) continue
