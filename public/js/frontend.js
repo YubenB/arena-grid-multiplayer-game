@@ -1,9 +1,7 @@
 const canvas = document.querySelector('canvas')
 const c = canvas.getContext('2d')
 
-const socket = io({
-  transports: ['websocket']
-})
+const socket = io()
 
 const leaderboardPanelEl = document.querySelector('.hud-leaderboard')
 const leaderboardToggleEl = document.querySelector('#leaderboardToggle')
@@ -113,8 +111,124 @@ const mobileState = {
 
 let lastLeaderboardUpdateAt = 0
 
+const SERVER_TICK_MS = 30
+const SERVER_PLAYER_SPEED = 6
+const INTERPOLATION_DELAY_MS = 60
+const INPUT_SEND_MS = 30
+
+const remoteSnapshotBuffers = {}
+const pendingInputs = []
+let localInputSequence = 0
+let lastInputSignature = ''
+let lastInputSentAt = 0
+
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value))
+}
+
+function inputSignature(input) {
+  return `${Number(input.up)}${Number(input.down)}${Number(input.left)}${Number(
+    input.right
+  )}`
+}
+
+function clampEntityWithinWorld(entity) {
+  if (!entity) return
+
+  const radius = entity.radius || 12
+  entity.x = clamp(entity.x, radius, world.width - radius)
+  entity.y = clamp(entity.y, radius, world.height - radius)
+}
+
+function applyInputToEntity(entity, input, deltaMs) {
+  if (!entity || !input) return
+
+  let moveX = 0
+  let moveY = 0
+
+  if (input.up) moveY -= 1
+  if (input.down) moveY += 1
+  if (input.left) moveX -= 1
+  if (input.right) moveX += 1
+
+  if (moveX === 0 && moveY === 0) return
+
+  const length = Math.hypot(moveX, moveY) || 1
+  const distance = (SERVER_PLAYER_SPEED * deltaMs) / SERVER_TICK_MS
+
+  entity.x += (moveX / length) * distance
+  entity.y += (moveY / length) * distance
+  clampEntityWithinWorld(entity)
+}
+
+function pushRemoteSnapshot(playerId, x, y, snapshotTime) {
+  if (playerId === socket.id) return
+
+  const buffer =
+    remoteSnapshotBuffers[playerId] || (remoteSnapshotBuffers[playerId] = [])
+  const lastSnapshot = buffer[buffer.length - 1]
+
+  if (lastSnapshot && snapshotTime <= lastSnapshot.time) {
+    if (snapshotTime === lastSnapshot.time) {
+      lastSnapshot.x = x
+      lastSnapshot.y = y
+    }
+    return
+  }
+
+  buffer.push({
+    time: snapshotTime,
+    x,
+    y
+  })
+
+  while (buffer.length > 30) {
+    buffer.shift()
+  }
+}
+
+function sampleRemoteSnapshot(playerId, renderTimestamp) {
+  const buffer = remoteSnapshotBuffers[playerId]
+  if (!buffer || buffer.length === 0) return null
+
+  while (buffer.length >= 2 && buffer[1].time <= renderTimestamp) {
+    buffer.shift()
+  }
+
+  if (buffer.length >= 2) {
+    const older = buffer[0]
+    const newer = buffer[1]
+    const span = Math.max(1, newer.time - older.time)
+    const alpha = clamp((renderTimestamp - older.time) / span, 0, 1)
+
+    return {
+      x: older.x + (newer.x - older.x) * alpha,
+      y: older.y + (newer.y - older.y) * alpha
+    }
+  }
+
+  return {
+    x: buffer[0].x,
+    y: buffer[0].y
+  }
+}
+
+function reconcileLocalPlayer(localPlayer, inputAck) {
+  if (!localPlayer) return
+
+  if (typeof inputAck === 'number' && Number.isFinite(inputAck)) {
+    while (pendingInputs.length > 0 && pendingInputs[0].sequence <= inputAck) {
+      pendingInputs.shift()
+    }
+  }
+
+  for (const pending of pendingInputs) {
+    applyInputToEntity(
+      localPlayer,
+      pending.input,
+      pending.deltaMs || SERVER_TICK_MS
+    )
+  }
 }
 
 function setDeathOverlayVisible(visible) {
@@ -211,6 +325,8 @@ function setMovementFromVector(dx, dy) {
   keys.s.pressed = dy > threshold
   keys.a.pressed = dx < -threshold
   keys.d.pressed = dx > threshold
+
+  emitBufferedInput(false)
 }
 
 function resetJoystickVisual() {
@@ -241,19 +357,23 @@ function clearPlayerInputs() {
   keys.d.pressed = false
   mobileState.movePointerId = null
   mobileState.aimPointerId = null
-  playerInputs.length = 0
-  lastSentInputX = 0
-  lastSentInputY = 0
-  lastInputSentAt = 0
   resetMobileMovement()
   resetMobileAim()
   stopAutoFire()
+
+  if (frontEndPlayers[socket.id]) {
+    emitBufferedInput(true)
+  }
 }
 
 function openMainMenuOverlay() {
   usernameOverlayEl.style.display = 'flex'
   setDeathOverlayVisible(false)
   setGameUiState(false)
+  pendingInputs.length = 0
+  localInputSequence = 0
+  lastInputSignature = ''
+  lastInputSentAt = 0
 
   if (usernameInputEl && !isTouchDevice) {
     usernameInputEl.focus()
@@ -451,51 +571,28 @@ socket.on('roomJoined', (payload) => {
   world.height = payload.world.height
 })
 
-function applyRoomStats(stats) {
-  roomState.roomId = stats.roomId
-  roomState.maxPlayers = stats.maxPlayers
-  world.width = stats.world.width
-  world.height = stats.world.height
-}
+socket.on('state', (payload) => {
+  const snapshotTime = performance.now()
 
-function applyProjectiles(backEndProjectiles) {
-  for (const id in backEndProjectiles) {
-    const backEndProjectile = backEndProjectiles[id]
-
-    if (!frontEndProjectiles[id]) {
-      frontEndProjectiles[id] = new Projectile({
-        x: backEndProjectile.x,
-        y: backEndProjectile.y,
-        radius: backEndProjectile.radius,
-        color: frontEndPlayers[backEndProjectile.playerId]?.color,
-        velocity: backEndProjectile.velocity
-      })
-    } else {
-      frontEndProjectiles[id].x = backEndProjectile.x
-      frontEndProjectiles[id].y = backEndProjectile.y
-      frontEndProjectiles[id].velocity = backEndProjectile.velocity
-    }
+  if (payload?.roomStats) {
+    roomState.roomId = payload.roomStats.roomId
+    roomState.maxPlayers = payload.roomStats.maxPlayers
+    world.width = payload.roomStats.world.width
+    world.height = payload.roomStats.world.height
   }
 
-  for (const frontEndProjectileId in frontEndProjectiles) {
-    if (!backEndProjectiles[frontEndProjectileId]) {
-      delete frontEndProjectiles[frontEndProjectileId]
-    }
-  }
-}
+  const backEndPlayers = {}
+  const visiblePlayers = Array.isArray(payload?.players) ? payload.players : []
 
-function applyPlayers(backEndPlayers) {
-  const now = performance.now()
-  if (now - lastLeaderboardUpdateAt > 200) {
-    updateLeaderboard(backEndPlayers)
-    lastLeaderboardUpdateAt = now
-  }
+  for (const backEndPlayer of visiblePlayers) {
+    if (!backEndPlayer?.id) continue
+    const playerId = backEndPlayer.id
+    backEndPlayers[playerId] = backEndPlayer
 
-  for (const id in backEndPlayers) {
-    const backEndPlayer = backEndPlayers[id]
+    const isAlive = backEndPlayer.isAlive ?? backEndPlayer.alive
 
-    if (!frontEndPlayers[id]) {
-      frontEndPlayers[id] = new Player({
+    if (!frontEndPlayers[playerId]) {
+      frontEndPlayers[playerId] = new Player({
         x: backEndPlayer.x,
         y: backEndPlayer.y,
         radius: backEndPlayer.radius,
@@ -506,42 +603,42 @@ function applyPlayers(backEndPlayers) {
         deaths: backEndPlayer.deaths,
         hp: backEndPlayer.hp,
         maxHp: backEndPlayer.maxHp,
-        isAlive: backEndPlayer.isAlive
+        isAlive
       })
-    } else {
-      frontEndPlayers[id].target = {
+    }
+
+    const player = frontEndPlayers[playerId]
+    player.score = backEndPlayer.score
+    player.kills = backEndPlayer.kills
+    player.deaths = backEndPlayer.deaths
+    player.hp = backEndPlayer.hp
+    player.maxHp = backEndPlayer.maxHp
+    player.isAlive = isAlive
+
+    if (playerId === socket.id) {
+      player.x = backEndPlayer.x
+      player.y = backEndPlayer.y
+      player.target = {
         x: backEndPlayer.x,
         y: backEndPlayer.y
       }
 
-      frontEndPlayers[id].score = backEndPlayer.score
-      frontEndPlayers[id].kills = backEndPlayer.kills
-      frontEndPlayers[id].deaths = backEndPlayer.deaths
-      frontEndPlayers[id].hp = backEndPlayer.hp
-      frontEndPlayers[id].maxHp = backEndPlayer.maxHp
-      frontEndPlayers[id].isAlive = backEndPlayer.isAlive
+      reconcileLocalPlayer(player, payload?.inputAck)
+    } else {
+      pushRemoteSnapshot(
+        playerId,
+        backEndPlayer.x,
+        backEndPlayer.y,
+        snapshotTime
+      )
 
-      if (id === socket.id) {
-        const lastBackendInputIndex = playerInputs.findIndex((input) => {
-          return backEndPlayer.sequenceNumber === input.sequenceNumber
-        })
-
-        if (lastBackendInputIndex > -1)
-          playerInputs.splice(0, lastBackendInputIndex + 1)
-
-        if (playerInputs.length > 120) {
-          playerInputs.splice(0, playerInputs.length - 120)
-        }
-
-        playerInputs.forEach((input) => {
-          frontEndPlayers[id].target.x += input.dx
-          frontEndPlayers[id].target.y += input.dy
-        })
+      player.target = {
+        x: backEndPlayer.x,
+        y: backEndPlayer.y
       }
     }
   }
 
-  // this is where we delete frontend players
   for (const id in frontEndPlayers) {
     if (!backEndPlayers[id]) {
       if (id === socket.id) {
@@ -550,37 +647,73 @@ function applyPlayers(backEndPlayers) {
       }
 
       delete frontEndPlayers[id]
+      delete remoteSnapshotBuffers[id]
     }
   }
 
+  const backEndProjectiles = {}
+  const visibleProjectiles = Array.isArray(payload?.projectiles)
+    ? payload.projectiles
+    : []
+
+  for (const backEndProjectile of visibleProjectiles) {
+    if (backEndProjectile?.id === undefined || backEndProjectile?.id === null)
+      continue
+
+    const projectileId = String(backEndProjectile.id)
+    backEndProjectiles[projectileId] = backEndProjectile
+
+    if (!frontEndProjectiles[projectileId]) {
+      frontEndProjectiles[projectileId] = new Projectile({
+        x: backEndProjectile.x,
+        y: backEndProjectile.y,
+        radius: backEndProjectile.radius,
+        color: frontEndPlayers[backEndProjectile.playerId]?.color,
+        velocity: backEndProjectile.velocity
+      })
+    }
+
+    frontEndProjectiles[projectileId].target = {
+      x: backEndProjectile.x,
+      y: backEndProjectile.y
+    }
+    frontEndProjectiles[projectileId].velocity = backEndProjectile.velocity
+
+    if (frontEndPlayers[backEndProjectile.playerId]) {
+      frontEndProjectiles[projectileId].color =
+        frontEndPlayers[backEndProjectile.playerId].color
+    }
+  }
+
+  for (const frontEndProjectileId in frontEndProjectiles) {
+    if (!backEndProjectiles[frontEndProjectileId]) {
+      delete frontEndProjectiles[frontEndProjectileId]
+    }
+  }
+
+  const now = performance.now()
+  if (now - lastLeaderboardUpdateAt > 200) {
+    updateLeaderboard(backEndPlayers)
+    lastLeaderboardUpdateAt = now
+  }
+
   syncPlayerUiState()
-}
-
-socket.on('stateUpdate', ({ players, projectiles, stats }) => {
-  if (stats) applyRoomStats(stats)
-  if (projectiles) applyProjectiles(projectiles)
-  if (players) applyPlayers(players)
-})
-
-// Backward compatibility in case old server event names are still emitted.
-socket.on('roomStats', (stats) => {
-  applyRoomStats(stats)
-})
-
-socket.on('updateProjectiles', (backEndProjectiles) => {
-  applyProjectiles(backEndProjectiles)
-})
-
-socket.on('updatePlayers', (backEndPlayers) => {
-  applyPlayers(backEndPlayers)
 })
 
 let animationId
-function animate() {
+let lastAnimationAt = performance.now()
+function animate(now = performance.now()) {
   animationId = requestAnimationFrame(animate)
+  const deltaMs = Math.max(0, Math.min(50, now - lastAnimationAt || 16))
+  lastAnimationAt = now
+
   c.clearRect(0, 0, VIEWPORT_WIDTH, VIEWPORT_HEIGHT)
 
   const localPlayer = frontEndPlayers[socket.id]
+  if (localPlayer && localPlayer.isAlive) {
+    applyInputToEntity(localPlayer, currentInputState(), deltaMs)
+  }
+
   if (localPlayer) {
     camera.x = clamp(
       localPlayer.x - VIEWPORT_WIDTH / 2,
@@ -596,16 +729,21 @@ function animate() {
 
   drawGrid()
 
+  const renderTimestamp = now - INTERPOLATION_DELAY_MS
+
   for (const id in frontEndPlayers) {
     const frontEndPlayer = frontEndPlayers[id]
 
-    // linear interpolation
-    if (frontEndPlayer.target) {
-      const smoothing = id === socket.id ? LOCAL_SMOOTHING : REMOTE_SMOOTHING
-      frontEndPlayers[id].x +=
-        (frontEndPlayers[id].target.x - frontEndPlayers[id].x) * smoothing
-      frontEndPlayers[id].y +=
-        (frontEndPlayers[id].target.y - frontEndPlayers[id].y) * smoothing
+    if (id !== socket.id) {
+      const interpolated = sampleRemoteSnapshot(id, renderTimestamp)
+
+      if (interpolated) {
+        frontEndPlayer.x = interpolated.x
+        frontEndPlayer.y = interpolated.y
+      } else if (frontEndPlayer.target) {
+        frontEndPlayer.x += (frontEndPlayer.target.x - frontEndPlayer.x) * 0.45
+        frontEndPlayer.y += (frontEndPlayer.target.y - frontEndPlayer.y) * 0.45
+      }
     }
 
     frontEndPlayer.draw(camera)
@@ -613,15 +751,23 @@ function animate() {
 
   for (const id in frontEndProjectiles) {
     const frontEndProjectile = frontEndProjectiles[id]
-    frontEndProjectile.x += frontEndProjectile.velocity.x
-    frontEndProjectile.y += frontEndProjectile.velocity.y
+
+    const tickScale = deltaMs / SERVER_TICK_MS
+    frontEndProjectile.x += frontEndProjectile.velocity.x * tickScale
+    frontEndProjectile.y += frontEndProjectile.velocity.y * tickScale
+
+    if (frontEndProjectile.target) {
+      frontEndProjectile.x +=
+        (frontEndProjectile.target.x - frontEndProjectile.x) * 0.22
+      frontEndProjectile.y +=
+        (frontEndProjectile.target.y - frontEndProjectile.y) * 0.22
+    }
+
     frontEndProjectile.draw(camera)
   }
 
   drawMiniMap()
 }
-
-animate()
 
 const keys = {
   w: {
@@ -638,83 +784,51 @@ const keys = {
   }
 }
 
-const SPEED = 5
-const playerInputs = []
-const INPUT_SEND_INTERVAL_MS = 33
-const INPUT_IDLE_RESEND_MS = 140
-const REMOTE_SMOOTHING = 0.34
-const LOCAL_SMOOTHING = 0.78
-let sequenceNumber = 0
-let lastSentInputX = 0
-let lastSentInputY = 0
-let lastInputSentAt = 0
-
-function buildMovementInput() {
-  const horizontal = (keys.d.pressed ? 1 : 0) - (keys.a.pressed ? 1 : 0)
-  const vertical = (keys.s.pressed ? 1 : 0) - (keys.w.pressed ? 1 : 0)
-
-  if (horizontal === 0 && vertical === 0) {
-    return { inputX: 0, inputY: 0 }
-  }
-
-  const magnitude = Math.hypot(horizontal, vertical)
-
+function currentInputState() {
   return {
-    inputX: horizontal / magnitude,
-    inputY: vertical / magnitude
+    up: keys.w.pressed,
+    down: keys.s.pressed,
+    left: keys.a.pressed,
+    right: keys.d.pressed
   }
 }
 
-setInterval(() => {
+function emitBufferedInput(force = false) {
   const localPlayer = frontEndPlayers[socket.id]
   if (!localPlayer || !localPlayer.isAlive) return
 
+  const input = currentInputState()
+  const signature = inputSignature(input)
   const now = performance.now()
-  const input = buildMovementInput()
-  const hasChangedInput =
-    Math.abs(input.inputX - lastSentInputX) > 0.001 ||
-    Math.abs(input.inputY - lastSentInputY) > 0.001
-  const shouldResendIdle = now - lastInputSentAt >= INPUT_IDLE_RESEND_MS
+  const deltaMs = lastInputSentAt
+    ? Math.max(8, Math.min(90, now - lastInputSentAt))
+    : INPUT_SEND_MS
 
-  if (!hasChangedInput && !shouldResendIdle) return
+  if (!force && signature === lastInputSignature) return
 
-  lastSentInputX = input.inputX
-  lastSentInputY = input.inputY
   lastInputSentAt = now
-  sequenceNumber++
+  lastInputSignature = signature
+  localInputSequence++
 
-  socket.emit('playerInput', {
-    inputX: input.inputX,
-    inputY: input.inputY,
-    sequenceNumber
-  })
-
-  if (input.inputX === 0 && input.inputY === 0) return
-
-  const dx = input.inputX * SPEED
-  const dy = input.inputY * SPEED
-
-  playerInputs.push({ sequenceNumber, dx, dy })
-
-  if (playerInputs.length > 120) {
-    playerInputs.splice(0, playerInputs.length - 120)
+  const packet = {
+    sequence: localInputSequence,
+    input,
+    deltaMs
   }
 
-  localPlayer.x = clamp(
-    localPlayer.x + dx,
-    localPlayer.radius,
-    world.width - localPlayer.radius
-  )
-  localPlayer.y = clamp(
-    localPlayer.y + dy,
-    localPlayer.radius,
-    world.height - localPlayer.radius
-  )
-  localPlayer.target = {
-    x: localPlayer.x,
-    y: localPlayer.y
+  pendingInputs.push(packet)
+  if (pendingInputs.length > 120) {
+    pendingInputs.shift()
   }
-}, INPUT_SEND_INTERVAL_MS)
+
+  socket.emit('input', packet)
+}
+
+setInterval(() => {
+  emitBufferedInput(true)
+}, INPUT_SEND_MS)
+
+animate()
 
 window.addEventListener('keydown', (event) => {
   if (!frontEndPlayers[socket.id]) return
@@ -736,6 +850,8 @@ window.addEventListener('keydown', (event) => {
       keys.d.pressed = true
       break
   }
+
+  emitBufferedInput(false)
 })
 
 window.addEventListener('keyup', (event) => {
@@ -758,6 +874,8 @@ window.addEventListener('keyup', (event) => {
       keys.d.pressed = false
       break
   }
+
+  emitBufferedInput(false)
 })
 
 document.querySelector('#usernameForm').addEventListener('submit', (event) => {
@@ -769,7 +887,10 @@ document.querySelector('#usernameForm').addEventListener('submit', (event) => {
 
   usernameOverlayEl.style.display = 'none'
   setDeathOverlayVisible(false)
-  playerInputs.length = 0
+  pendingInputs.length = 0
+  localInputSequence = 0
+  lastInputSignature = ''
+  lastInputSentAt = 0
 
   socket.emit('initGame', {
     username: usernameInputEl ? usernameInputEl.value : ''
