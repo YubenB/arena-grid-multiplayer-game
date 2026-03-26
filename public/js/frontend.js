@@ -117,6 +117,7 @@ const INTERPOLATION_DELAY_MS = 60
 const INPUT_SEND_MS = 30
 
 const remoteSnapshotBuffers = {}
+const projectileSnapshotBuffers = {}
 const pendingInputs = []
 let localInputSequence = 0
 let lastInputSignature = ''
@@ -211,6 +212,70 @@ function sampleRemoteSnapshot(playerId, renderTimestamp) {
   return {
     x: buffer[0].x,
     y: buffer[0].y
+  }
+}
+
+function pushProjectileSnapshot(projectileId, projectile, snapshotTime) {
+  const buffer =
+    projectileSnapshotBuffers[projectileId] ||
+    (projectileSnapshotBuffers[projectileId] = [])
+  const lastSnapshot = buffer[buffer.length - 1]
+
+  const vx = projectile?.velocity?.x || 0
+  const vy = projectile?.velocity?.y || 0
+
+  if (lastSnapshot && snapshotTime <= lastSnapshot.time) {
+    if (snapshotTime === lastSnapshot.time) {
+      lastSnapshot.x = projectile.x
+      lastSnapshot.y = projectile.y
+      lastSnapshot.vx = vx
+      lastSnapshot.vy = vy
+    }
+    return
+  }
+
+  buffer.push({
+    time: snapshotTime,
+    x: projectile.x,
+    y: projectile.y,
+    vx,
+    vy
+  })
+
+  while (buffer.length > 40) {
+    buffer.shift()
+  }
+}
+
+function sampleProjectileSnapshot(projectileId, renderTimestamp) {
+  const buffer = projectileSnapshotBuffers[projectileId]
+  if (!buffer || buffer.length === 0) return null
+
+  while (buffer.length >= 2 && buffer[1].time <= renderTimestamp) {
+    buffer.shift()
+  }
+
+  if (buffer.length >= 2) {
+    const older = buffer[0]
+    const newer = buffer[1]
+    const span = Math.max(1, newer.time - older.time)
+    const alpha = clamp((renderTimestamp - older.time) / span, 0, 1)
+
+    return {
+      x: older.x + (newer.x - older.x) * alpha,
+      y: older.y + (newer.y - older.y) * alpha
+    }
+  }
+
+  const latest = buffer[0]
+  const leadTicks = clamp(
+    (renderTimestamp - latest.time) / SERVER_TICK_MS,
+    0,
+    3
+  )
+  return {
+    x: latest.x + latest.vx * leadTicks,
+    y: latest.y + latest.vy * leadTicks
   }
 }
 
@@ -687,14 +752,11 @@ socket.on('state', (payload) => {
       })
     }
 
-    frontEndProjectiles[projectileId].target = {
-      x: backEndProjectile.x,
-      y: backEndProjectile.y
-    }
     frontEndProjectiles[projectileId].velocity = backEndProjectile.velocity || {
       x: 0,
       y: 0
     }
+    pushProjectileSnapshot(projectileId, backEndProjectile, snapshotTime)
 
     if (frontEndPlayers[backEndProjectile.playerId]) {
       frontEndProjectiles[projectileId].color =
@@ -705,6 +767,7 @@ socket.on('state', (payload) => {
   for (const frontEndProjectileId in frontEndProjectiles) {
     if (!backEndProjectiles[frontEndProjectileId]) {
       delete frontEndProjectiles[frontEndProjectileId]
+      delete projectileSnapshotBuffers[frontEndProjectileId]
     }
   }
 
@@ -770,15 +833,14 @@ function animate(now = performance.now()) {
     const frontEndProjectile = frontEndProjectiles[id]
     const velocity = frontEndProjectile.velocity || { x: 0, y: 0 }
 
-    const tickScale = deltaMs / SERVER_TICK_MS
-    frontEndProjectile.x += (velocity.x || 0) * tickScale
-    frontEndProjectile.y += (velocity.y || 0) * tickScale
-
-    if (frontEndProjectile.target) {
-      frontEndProjectile.x +=
-        (frontEndProjectile.target.x - frontEndProjectile.x) * 0.22
-      frontEndProjectile.y +=
-        (frontEndProjectile.target.y - frontEndProjectile.y) * 0.22
+    const interpolatedProjectile = sampleProjectileSnapshot(id, renderTimestamp)
+    if (interpolatedProjectile) {
+      frontEndProjectile.x = interpolatedProjectile.x
+      frontEndProjectile.y = interpolatedProjectile.y
+    } else {
+      const tickScale = deltaMs / SERVER_TICK_MS
+      frontEndProjectile.x += (velocity.x || 0) * tickScale
+      frontEndProjectile.y += (velocity.y || 0) * tickScale
     }
 
     frontEndProjectile.draw(camera)
